@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import axios, { AxiosError } from 'axios';
 import * as cheerio from 'cheerio';
 import TurndownService from 'turndown';
+import { lookup } from 'dns/promises';
 
 // =============================================================================
 // CONFIGURATION
@@ -30,6 +31,26 @@ const AXIOS_TIMEOUT = 8000;
  */
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+/**
+ * Blocked hostnames for SSRF protection.
+ */
+const BLOCKED_HOSTNAMES = [
+  'localhost',
+  'localhost.localdomain',
+  'ip6-localhost',
+  'ip6-loopback',
+];
+
+/**
+ * Dangerous URI schemes to sanitize (XSS protection).
+ */
+const DANGEROUS_URI_SCHEMES = [
+  'javascript:',
+  'vbscript:',
+  'data:',
+  'file:',
+];
 
 /**
  * Selectors for elements to remove during HTML cleaning.
@@ -237,6 +258,38 @@ function cleanHtml(html: string): { cleanedHtml: string; title: string | null } 
   $('*').removeAttr('onload');
   $('*').removeAttr('onerror');
 
+  // ==========================================================================
+  // XSS PROTECTION: Sanitize dangerous URI schemes in links
+  // ==========================================================================
+  $('a[href]').each((_, el) => {
+    const $el = $(el);
+    const href = ($el.attr('href') || '').trim().toLowerCase();
+
+    // Check for dangerous URI schemes
+    const isDangerous = DANGEROUS_URI_SCHEMES.some((scheme) =>
+      href.startsWith(scheme)
+    );
+
+    if (isDangerous) {
+      // Remove the href attribute entirely to neutralize the link
+      $el.removeAttr('href');
+    }
+  });
+
+  // Also sanitize form actions
+  $('form[action]').each((_, el) => {
+    const $el = $(el);
+    const action = ($el.attr('action') || '').trim().toLowerCase();
+
+    const isDangerous = DANGEROUS_URI_SCHEMES.some((scheme) =>
+      action.startsWith(scheme)
+    );
+
+    if (isDangerous) {
+      $el.removeAttr('action');
+    }
+  });
+
   // Get the body content, or fall back to the entire document
   const body = $('body').html() || $.html();
 
@@ -313,6 +366,117 @@ function validateUrl(urlString: string): URL | null {
 }
 
 // =============================================================================
+// SSRF PROTECTION
+// =============================================================================
+
+/**
+ * Checks if an IP address is private/internal (RFC 1918, loopback, link-local, etc.)
+ */
+function isPrivateIP(ip: string): boolean {
+  // Handle IPv4
+  const ipv4Parts = ip.split('.').map(Number);
+  if (ipv4Parts.length === 4 && ipv4Parts.every((p) => p >= 0 && p <= 255)) {
+    const [a, b, c, d] = ipv4Parts;
+
+    // Loopback: 127.0.0.0/8
+    if (a === 127) return true;
+
+    // Private: 10.0.0.0/8
+    if (a === 10) return true;
+
+    // Private: 172.16.0.0/12
+    if (a === 172 && b >= 16 && b <= 31) return true;
+
+    // Private: 192.168.0.0/16
+    if (a === 192 && b === 168) return true;
+
+    // Link-local: 169.254.0.0/16 (includes AWS metadata endpoint)
+    if (a === 169 && b === 254) return true;
+
+    // Current network: 0.0.0.0/8
+    if (a === 0) return true;
+
+    // Broadcast
+    if (a === 255 && b === 255 && c === 255 && d === 255) return true;
+
+    // CGNAT: 100.64.0.0/10
+    if (a === 100 && b >= 64 && b <= 127) return true;
+
+    return false;
+  }
+
+  // Handle IPv6
+  const ipv6Lower = ip.toLowerCase();
+
+  // Loopback: ::1
+  if (ipv6Lower === '::1' || ipv6Lower === '0:0:0:0:0:0:0:1') return true;
+
+  // Unspecified: ::
+  if (ipv6Lower === '::' || ipv6Lower === '0:0:0:0:0:0:0:0') return true;
+
+  // Link-local: fe80::/10
+  if (ipv6Lower.startsWith('fe80:') || ipv6Lower.startsWith('fe80')) return true;
+
+  // Unique local: fc00::/7 (fd00::/8 commonly used)
+  if (ipv6Lower.startsWith('fc') || ipv6Lower.startsWith('fd')) return true;
+
+  // IPv4-mapped IPv6: ::ffff:x.x.x.x
+  const ipv4MappedMatch = ipv6Lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (ipv4MappedMatch) {
+    return isPrivateIP(ipv4MappedMatch[1]);
+  }
+
+  return false;
+}
+
+/**
+ * Validates that a URL does not point to a private/internal address.
+ * Resolves DNS and checks the resulting IP against blocked ranges.
+ */
+async function validateUrlNotPrivate(url: URL): Promise<{ safe: boolean; reason?: string }> {
+  const hostname = url.hostname;
+
+  // Check blocked hostnames
+  if (BLOCKED_HOSTNAMES.includes(hostname.toLowerCase())) {
+    return { safe: false, reason: 'Hostname is blocked' };
+  }
+
+  // Check if hostname is already an IP address
+  const isIPv4 = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+  const isIPv6 = hostname.includes(':');
+
+  if (isIPv4 || isIPv6) {
+    // Direct IP address - check immediately
+    const cleanIP = hostname.replace(/^\[|\]$/g, ''); // Remove IPv6 brackets
+    if (isPrivateIP(cleanIP)) {
+      return { safe: false, reason: 'Direct access to private IP addresses is not allowed' };
+    }
+    return { safe: true };
+  }
+
+  // Resolve DNS to get IP address
+  try {
+    const result = await lookup(hostname, { all: true });
+
+    // Check all resolved IPs
+    for (const entry of result) {
+      if (isPrivateIP(entry.address)) {
+        return {
+          safe: false,
+          reason: `Hostname resolves to private IP address (${entry.address})`,
+        };
+      }
+    }
+
+    return { safe: true };
+  } catch (error) {
+    // DNS resolution failed - could be invalid hostname
+    const message = error instanceof Error ? error.message : 'Unknown DNS error';
+    return { safe: false, reason: `DNS resolution failed: ${message}` };
+  }
+}
+
+// =============================================================================
 // ERROR RESPONSE HELPER
 // =============================================================================
 
@@ -383,6 +547,15 @@ export default async function handler(
   const validatedUrl = validateUrl(targetUrl);
   if (!validatedUrl) {
     sendError(res, 400, 'INVALID_URL', 'The provided URL is not valid. Must be a valid HTTP or HTTPS URL.');
+    return;
+  }
+
+  // ==========================================================================
+  // SSRF PROTECTION: Validate URL does not target internal/private addresses
+  // ==========================================================================
+  const ssrfCheck = await validateUrlNotPrivate(validatedUrl);
+  if (!ssrfCheck.safe) {
+    sendError(res, 403, 'SSRF_BLOCKED', ssrfCheck.reason || 'Access to this URL is not allowed');
     return;
   }
 
