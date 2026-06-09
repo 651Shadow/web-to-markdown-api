@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import axios, { AxiosError } from 'axios';
 import * as cheerio from 'cheerio';
 import TurndownService from 'turndown';
+import { tables, strikethrough } from 'turndown-plugin-gfm';
 import { lookup } from 'dns/promises';
 
 // =============================================================================
@@ -338,6 +339,9 @@ function convertToMarkdown(html: string): string {
     linkReferenceStyle: 'full',
   });
 
+  // GFM tables and strikethrough so tabular data keeps its structure
+  turndownService.use([tables, strikethrough]);
+
   // Remove images to save tokens (optional: could be made configurable)
   turndownService.addRule('removeImages', {
     filter: 'img',
@@ -359,6 +363,7 @@ function convertToMarkdown(html: string): string {
 
   // Post-process: remove excessive whitespace
   return markdown
+    .replace(/^(\s*)-\s+/gm, '$1- ') // Single space after list markers (saves tokens)
     .replace(/\n{3,}/g, '\n\n') // Max 2 consecutive newlines
     .replace(/[ \t]+$/gm, '') // Remove trailing whitespace
     .trim();

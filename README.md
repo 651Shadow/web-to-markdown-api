@@ -14,6 +14,7 @@ When feeding web content to LLMs, you're paying for every token—including usel
 - **Two Input Modes** - Fetch any URL, or send raw HTML (files, scraped pages, email bodies) directly
 - **Aggressive HTML Cleaning** - Removes ads, navigation, footers, modals, cookie banners, and 50+ categories of junk
 - **Token-Optimized Output** - Clean Markdown that maximizes information density
+- **GFM Tables** - HTML tables convert to pipe tables instead of collapsing into loose text
 - **Absolute Links** - Relative links are resolved against the source URL (or `base_url`) so output is self-contained
 - **Fast & Reliable** - 8-second timeout with graceful error handling
 - **Secure** - Gatekeeper authentication pattern prevents unauthorized access
