@@ -174,7 +174,8 @@ const JUNK_SELECTORS = [
 // =============================================================================
 
 interface ApiResponse {
-  url: string;
+  url: string | null;
+  source: 'url' | 'html';
   markdown: string;
   meta: {
     title: string | null;
@@ -227,7 +228,10 @@ function validateAuth(req: VercelRequest): boolean {
  * Aggressively cleans HTML by removing non-content elements.
  * Returns the cleaned HTML and extracted metadata.
  */
-function cleanHtml(html: string): { cleanedHtml: string; title: string | null } {
+function cleanHtml(
+  html: string,
+  baseUrl?: string
+): { cleanedHtml: string; title: string | null } {
   const $ = cheerio.load(html);
 
   // Extract title before cleaning
@@ -289,6 +293,21 @@ function cleanHtml(html: string): { cleanedHtml: string; title: string | null } 
       $el.removeAttr('action');
     }
   });
+
+  // Resolve relative links to absolute URLs so the Markdown is
+  // self-contained when ingested out of context
+  if (baseUrl) {
+    $('a[href]').each((_, el) => {
+      const $el = $(el);
+      const href = $el.attr('href');
+      if (!href || href.startsWith('#')) return;
+      try {
+        $el.attr('href', new URL(href, baseUrl).href);
+      } catch {
+        // Leave unresolvable hrefs as-is
+      }
+    });
+  }
 
   // Get the body content, or fall back to the entire document
   const body = $('body').html() || $.html();
@@ -527,19 +546,102 @@ export default async function handler(
   }
 
   // ==========================================================================
-  // EXTRACT URL PARAMETER
+  // EXTRACT INPUT: raw HTML (direct ingestion) or URL (fetch mode)
   // ==========================================================================
   let targetUrl: string | undefined;
+  let rawHtml: string | undefined;
+  let baseUrl: string | undefined;
 
   if (req.method === 'GET') {
     targetUrl = req.query.url as string | undefined;
   } else {
-    // POST: check body first, then query params
-    targetUrl = (req.body?.url as string | undefined) || (req.query.url as string | undefined);
+    const contentType = (req.headers['content-type'] || '').toLowerCase();
+
+    if (contentType.includes('text/html') || contentType.includes('text/plain')) {
+      // Raw HTML document posted directly (e.g. curl --data-binary @page.html)
+      rawHtml = typeof req.body === 'string' ? req.body : undefined;
+      baseUrl = req.query.base_url as string | undefined;
+    } else {
+      // JSON body: { "html": "..." } or { "url": "..." }
+      rawHtml = req.body?.html as string | undefined;
+      baseUrl =
+        (req.body?.base_url as string | undefined) ||
+        (req.query.base_url as string | undefined);
+      targetUrl =
+        (req.body?.url as string | undefined) || (req.query.url as string | undefined);
+    }
   }
 
+  if (!targetUrl && !rawHtml) {
+    sendError(
+      res,
+      400,
+      'MISSING_INPUT',
+      'Provide a "url" parameter to fetch, an "html" field with raw HTML, or POST an HTML document with Content-Type: text/html'
+    );
+    return;
+  }
+
+  // ==========================================================================
+  // MODE 1: DIRECT HTML INGESTION (no fetching, no SSRF surface)
+  // ==========================================================================
+  if (rawHtml !== undefined) {
+    if (rawHtml.trim() === '') {
+      sendError(res, 400, 'EMPTY_HTML', 'The provided HTML content is empty');
+      return;
+    }
+
+    const htmlLength = Buffer.byteLength(rawHtml, 'utf8');
+    if (ENABLE_SIZE_LIMIT && htmlLength > MAX_CONTENT_LENGTH) {
+      sendError(res, 413, 'PAGE_TOO_LARGE', 'HTML exceeds the 2MB size limit for free tier');
+      return;
+    }
+
+    // Optional base URL used only to resolve relative links in the output
+    let resolvedBase: string | undefined;
+    if (baseUrl) {
+      const validatedBase = validateUrl(baseUrl);
+      if (!validatedBase) {
+        sendError(res, 400, 'INVALID_BASE_URL', 'The "base_url" must be a valid HTTP or HTTPS URL');
+        return;
+      }
+      resolvedBase = validatedBase.href;
+    }
+
+    try {
+      const { cleanedHtml, title } = cleanHtml(rawHtml, resolvedBase);
+      const markdown = convertToMarkdown(cleanedHtml);
+      const cleanLength = Buffer.byteLength(markdown, 'utf8');
+      const tokenSavingsPercentage =
+        htmlLength > 0
+          ? Math.round(((htmlLength - cleanLength) / htmlLength) * 100)
+          : 0;
+
+      const response: ApiResponse = {
+        url: resolvedBase || null,
+        source: 'html',
+        markdown,
+        meta: {
+          title,
+          original_length: htmlLength,
+          clean_length: cleanLength,
+          token_savings_percentage: Math.max(0, tokenSavingsPercentage),
+        },
+      };
+
+      res.status(200).json(response);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      sendError(res, 500, 'PROCESSING_ERROR', `Failed to process the HTML: ${message}`);
+    }
+    return;
+  }
+
+  // ==========================================================================
+  // MODE 2: URL FETCH
+  // ==========================================================================
   if (!targetUrl) {
-    sendError(res, 400, 'MISSING_URL', 'The "url" parameter is required');
+    sendError(res, 400, 'MISSING_INPUT', 'The "url" parameter is required');
     return;
   }
 
@@ -626,8 +728,8 @@ export default async function handler(
   // CLEAN AND CONVERT
   // ==========================================================================
   try {
-    // Clean the HTML
-    const { cleanedHtml, title } = cleanHtml(html);
+    // Clean the HTML, resolving relative links against the fetched URL
+    const { cleanedHtml, title } = cleanHtml(html, validatedUrl.href);
 
     // Convert to Markdown
     const markdown = convertToMarkdown(cleanedHtml);
@@ -642,6 +744,7 @@ export default async function handler(
     // Build response
     const response: ApiResponse = {
       url: validatedUrl.href,
+      source: 'url',
       markdown,
       meta: {
         title,
