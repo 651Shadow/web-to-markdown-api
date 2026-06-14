@@ -1,6 +1,6 @@
 # LLM-Ready Web Reader
 
-> Stop wasting money on OpenAI tokens processing HTML tags. This API converts any URL into clean, dense Markdown specifically optimized for RAG and AI Context Windows. Saves up to 60% on token costs.
+> Stop wasting money on OpenAI tokens processing HTML tags. This API converts any URL **or raw HTML document** into clean, dense Markdown specifically optimized for RAG and AI Context Windows. Saves up to 60% on token costs.
 
 ## Why This Exists
 
@@ -11,8 +11,11 @@ When feeding web content to LLMs, you're paying for every token—including usel
 
 ## Features
 
+- **Two Input Modes** - Fetch any URL, or send raw HTML (files, scraped pages, email bodies) directly
 - **Aggressive HTML Cleaning** - Removes ads, navigation, footers, modals, cookie banners, and 50+ categories of junk
 - **Token-Optimized Output** - Clean Markdown that maximizes information density
+- **GFM Tables** - HTML tables convert to pipe tables instead of collapsing into loose text
+- **Absolute Links** - Relative links are resolved against the source URL (or `base_url`) so output is self-contained
 - **Fast & Reliable** - 8-second timeout with graceful error handling
 - **Secure** - Gatekeeper authentication pattern prevents unauthorized access
 - **Size Protection** - 2MB limit prevents memory exhaustion
@@ -43,11 +46,33 @@ curl -X POST "https://your-api.vercel.app/" \
   -d '{"url": "https://example.com"}'
 ```
 
+### Convert an HTML File Directly
+
+Send raw HTML — no fetching involved:
+
+```bash
+# POST an HTML file as the request body
+curl -X POST "https://your-api.vercel.app/" \
+  -H "Content-Type: text/html" \
+  -H "x-rapidapi-proxy-secret: YOUR_RAPIDAPI_SECRET" \
+  --data-binary @page.html
+```
+
+Or embed HTML in a JSON body, with an optional `base_url` to resolve relative links:
+
+```bash
+curl -X POST "https://your-api.vercel.app/" \
+  -H "Content-Type: application/json" \
+  -H "x-rapidapi-proxy-secret: YOUR_RAPIDAPI_SECRET" \
+  -d '{"html": "<html><body><h1>Hello</h1><a href=\"/docs\">Docs</a></body></html>", "base_url": "https://example.com"}'
+```
+
 ### Response
 
 ```json
 {
   "url": "https://example.com",
+  "source": "url",
   "markdown": "# Example Domain\n\nThis domain is for use in illustrative examples...",
   "meta": {
     "title": "Example Domain",
@@ -77,15 +102,20 @@ One of the following headers is **required**:
 
 ### Parameters
 
+Provide **either** `url` (fetch mode) **or** `html` (direct ingestion mode):
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `url` | string | Yes | The URL to convert to Markdown |
+| `url` | string | One of `url`/`html` | The URL to fetch and convert to Markdown (GET query or POST JSON body) |
+| `html` | string | One of `url`/`html` | Raw HTML to convert (POST JSON body), or POST the document directly with `Content-Type: text/html` |
+| `base_url` | string | No | Base URL used to resolve relative links when sending raw HTML |
 
 ### Response Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `url` | string | The source URL |
+| `url` | string \| null | The source URL (or `base_url` for raw HTML; `null` if neither) |
+| `source` | string | `"url"` (fetched) or `"html"` (direct ingestion) |
 | `markdown` | string | The converted Markdown content |
 | `meta.title` | string \| null | Page title (if available) |
 | `meta.original_length` | number | Original HTML size in bytes |
@@ -96,12 +126,14 @@ One of the following headers is **required**:
 
 | Status | Code | Description |
 |--------|------|-------------|
-| 400 | `MISSING_URL` | No URL parameter provided |
+| 400 | `MISSING_INPUT` | Neither `url` nor `html` provided |
 | 400 | `INVALID_URL` | URL format is invalid |
+| 400 | `INVALID_BASE_URL` | `base_url` format is invalid |
+| 400 | `EMPTY_HTML` | Provided HTML content is empty |
 | 403 | `FORBIDDEN` | Missing or invalid authentication |
 | 404 | `PAGE_NOT_FOUND` | Target page not found |
 | 405 | `METHOD_NOT_ALLOWED` | Only GET/POST supported |
-| 413 | `PAGE_TOO_LARGE` | Page exceeds 2MB limit |
+| 413 | `PAGE_TOO_LARGE` | Page or HTML exceeds 2MB limit |
 | 502 | `FETCH_ERROR` | Failed to fetch target page |
 | 504 | `TIMEOUT` | Request timed out (>8 seconds) |
 
