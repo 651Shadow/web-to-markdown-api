@@ -33,6 +33,10 @@ const AXIOS_TIMEOUT = 8000;
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const RATE_LIMIT_MAX_REQUESTS = 30;
+const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+
 /**
  * Blocked hostnames for SSRF protection.
  */
@@ -207,9 +211,12 @@ interface FetchValidationResult {
  * Validates incoming requests against allowed authentication headers.
  * Returns true if the request is authorized, false otherwise.
  */
-function validateAuth(req: VercelRequest): boolean {
+function validateAuth(
+  req: VercelRequest
+): { allowed: boolean; statusCode?: number; message?: string } {
   const rapidApiSecret = process.env.RAPIDAPI_SECRET;
   const adminSecret = process.env.ADMIN_SECRET;
+  const allowUnauthenticatedDev = process.env.ALLOW_UNAUTHENTICATED_DEV === 'true';
 
   // Get headers (case-insensitive)
   const rapidApiHeader = req.headers['x-rapidapi-proxy-secret'] as string | undefined;
@@ -217,15 +224,79 @@ function validateAuth(req: VercelRequest): boolean {
 
   // Check RapidAPI secret (for paying customers)
   if (rapidApiSecret && rapidApiHeader === rapidApiSecret) {
-    return true;
+    return { allowed: true };
   }
 
   // Check Admin secret (for local testing/personal use)
   if (adminSecret && adminHeader === adminSecret) {
-    return true;
+    return { allowed: true };
   }
 
-  return false;
+  if (!rapidApiSecret && !adminSecret) {
+    if (allowUnauthenticatedDev) {
+      return { allowed: true };
+    }
+
+    return {
+      allowed: false,
+      statusCode: 503,
+      message:
+        'Server authentication is not configured. Set RAPIDAPI_SECRET or ADMIN_SECRET, or ALLOW_UNAUTHENTICATED_DEV=true for local-only testing.',
+    };
+  }
+
+  return {
+    allowed: false,
+    statusCode: 403,
+    message: 'Invalid or missing authentication credentials',
+  };
+}
+
+function getClientIp(req: VercelRequest): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+
+  const realIp = req.headers['x-real-ip'];
+  if (typeof realIp === 'string' && realIp.trim()) {
+    return realIp.trim();
+  }
+
+  return 'unknown';
+}
+
+function checkRateLimit(clientIp: string): {
+  allowed: boolean;
+  remaining: number;
+  limit: number;
+  retryAfterSeconds: number;
+} {
+  const now = Date.now();
+  const windowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || RATE_LIMIT_WINDOW_MS);
+  const limit = Number(process.env.RATE_LIMIT_MAX || RATE_LIMIT_MAX_REQUESTS);
+  const current = rateLimitStore.get(clientIp);
+
+  if (!current || current.resetAt <= now) {
+    rateLimitStore.set(clientIp, { count: 1, resetAt: now + windowMs });
+    return {
+      allowed: true,
+      remaining: Math.max(limit - 1, 0),
+      limit,
+      retryAfterSeconds: Math.ceil(windowMs / 1000),
+    };
+  }
+
+  current.count += 1;
+  rateLimitStore.set(clientIp, current);
+  const retryAfterSeconds = Math.max(Math.ceil((current.resetAt - now) / 1000), 1);
+
+  return {
+    allowed: current.count <= limit,
+    remaining: Math.max(limit - current.count, 0),
+    limit,
+    retryAfterSeconds,
+  };
 }
 
 // =============================================================================
@@ -590,8 +661,25 @@ export default async function handler(
   // ==========================================================================
   // SECURITY CHECK
   // ==========================================================================
-  if (!validateAuth(req)) {
-    sendError(res, 403, 'FORBIDDEN', 'Invalid or missing authentication credentials');
+  const authResult = validateAuth(req);
+  if (!authResult.allowed) {
+    sendError(
+      res,
+      authResult.statusCode || 403,
+      'FORBIDDEN',
+      authResult.message || 'Invalid or missing authentication credentials'
+    );
+    return;
+  }
+
+  const clientIp = getClientIp(req);
+  const rateLimit = checkRateLimit(clientIp);
+  res.setHeader('X-RateLimit-Limit', String(rateLimit.limit));
+  res.setHeader('X-RateLimit-Remaining', String(rateLimit.remaining));
+  res.setHeader('Retry-After', String(rateLimit.retryAfterSeconds));
+
+  if (!rateLimit.allowed) {
+    sendError(res, 429, 'RATE_LIMITED', 'Too many requests. Please try again later.');
     return;
   }
 
@@ -834,4 +922,7 @@ export const __testables = {
   validateUrl,
   cleanHtml,
   convertToMarkdown,
+  validateAuth,
+  checkRateLimit,
+  resetRateLimitStore: () => rateLimitStore.clear(),
 };

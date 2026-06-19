@@ -15,6 +15,8 @@ This repo is intended to stay **private until deployment credentials and rate-li
 - redirect chains that land on private addresses
 - non-HTML fetched responses in URL mode
 - oversized pages and HTML payloads
+- unauthenticated requests unless `ALLOW_UNAUTHENTICATED_DEV=true`
+- bursty callers via a lightweight in-memory rate limiter
 
 ## API shape
 ### GET
@@ -44,7 +46,12 @@ npm run build
 ```env
 RAPIDAPI_SECRET=replace-me
 ADMIN_SECRET=replace-me
+ALLOW_UNAUTHENTICATED_DEV=false
+RATE_LIMIT_MAX=30
+RATE_LIMIT_WINDOW_MS=60000
 ```
+
+Use `.env.example` as the local starting point. In shared environments, leave `ALLOW_UNAUTHENTICATED_DEV=false`.
 
 ## Current limits
 - 8 second fetch timeout
@@ -52,6 +59,6 @@ ADMIN_SECRET=replace-me
 - fetch mode accepts only HTTP/HTTPS URLs that resolve to public addresses
 
 ## Next improvements
-- add deployment-time rate limiting / quotas
+- move from in-memory throttling to deployment-backed quotas if the API is ever exposed publicly
 - add integration tests around the Vercel handler
 - publish usage examples only after production auth and quotas are configured
