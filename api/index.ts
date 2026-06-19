@@ -192,6 +192,13 @@ interface ErrorResponse {
   code: number;
 }
 
+interface FetchValidationResult {
+  ok: boolean;
+  finalUrl?: URL;
+  contentType?: string;
+  reason?: string;
+}
+
 // =============================================================================
 // SECURITY: GATEKEEPER PATTERN
 // =============================================================================
@@ -500,6 +507,44 @@ async function validateUrlNotPrivate(url: URL): Promise<{ safe: boolean; reason?
   }
 }
 
+/**
+ * Validates the final fetched URL after redirects and checks the response content type.
+ */
+async function validateFetchedResponse(
+  finalUrlRaw: string,
+  contentTypeHeader: string | undefined
+): Promise<FetchValidationResult> {
+  const finalUrl = validateUrl(finalUrlRaw);
+  if (!finalUrl) {
+    return { ok: false, reason: 'Final redirect target is not a valid HTTP or HTTPS URL' };
+  }
+
+  const ssrfCheck = await validateUrlNotPrivate(finalUrl);
+  if (!ssrfCheck.safe) {
+    return { ok: false, reason: ssrfCheck.reason || 'Redirect target is not allowed' };
+  }
+
+  const normalizedContentType = (contentTypeHeader || '').toLowerCase();
+  const isHtml =
+    normalizedContentType.includes('text/html') ||
+    normalizedContentType.includes('application/xhtml+xml');
+
+  if (!isHtml) {
+    return {
+      ok: false,
+      finalUrl,
+      contentType: normalizedContentType,
+      reason: `Fetched content is not HTML (received ${contentTypeHeader || 'unknown content-type'})`,
+    };
+  }
+
+  return {
+    ok: true,
+    finalUrl,
+    contentType: normalizedContentType,
+  };
+}
+
 // =============================================================================
 // ERROR RESPONSE HELPER
 // =============================================================================
@@ -694,6 +739,22 @@ export default async function handler(
     }
 
     const response = await axios.get(validatedUrl.href, axiosConfig);
+    const finalUrlRaw = response.request?.res?.responseUrl || validatedUrl.href;
+    const fetchValidation = await validateFetchedResponse(
+      finalUrlRaw,
+      response.headers['content-type'] as string | undefined
+    );
+
+    if (!fetchValidation.ok) {
+      sendError(
+        res,
+        403,
+        'FETCH_BLOCKED',
+        fetchValidation.reason || 'Fetched response failed security validation'
+      );
+      return;
+    }
+
     html = response.data;
     originalLength = Buffer.byteLength(html, 'utf8');
   } catch (error) {
@@ -765,3 +826,12 @@ export default async function handler(
     sendError(res, 500, 'PROCESSING_ERROR', `Failed to process the page: ${message}`);
   }
 }
+
+export const __testables = {
+  isPrivateIP,
+  validateUrlNotPrivate,
+  validateFetchedResponse,
+  validateUrl,
+  cleanHtml,
+  convertToMarkdown,
+};
