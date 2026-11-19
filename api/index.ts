@@ -196,6 +196,191 @@ interface ErrorResponse {
   code: number;
 }
 
+const CONVERSION_QUERY_PARAMS = new Set(['url', 'html', 'base_url']);
+
+const LANDING_INFO = {
+  service: 'web-to-markdown-api',
+  description:
+    'Convert public web pages or raw HTML into clean, LLM-ready Markdown for RAG and AI context windows.',
+  status: 'ok',
+  authentication: {
+    required_for_conversion: true,
+    mode: 'fail-closed',
+    headers: ['x-rapidapi-proxy-secret', 'x-admin-key'],
+  },
+  endpoints: [
+    {
+      method: 'GET',
+      path: '/',
+      auth_required: false,
+      description: 'Public API overview (returns HTML for browsers or JSON for API clients).',
+    },
+    {
+      method: 'GET',
+      path: '/?url=<encoded_url>',
+      auth_required: true,
+      description: 'Fetch a public HTTP/HTTPS web page and return cleaned Markdown.',
+    },
+    {
+      method: 'POST',
+      path: '/',
+      auth_required: true,
+      content_types: ['application/json', 'text/html', 'text/plain'],
+      description:
+        'Convert a target URL ({"url": "..."}) or raw HTML ({"html": "...", "base_url": "..."} or text/html body) into Markdown.',
+    },
+  ],
+  usage: {
+    get_url:
+      "curl -G 'https://web-to-markdown-api.vercel.app/' --data-urlencode 'url=https://example.com/article' -H 'x-rapidapi-proxy-secret: YOUR_SECRET'",
+    post_json:
+      'curl -X POST \'https://web-to-markdown-api.vercel.app/\' -H \'Content-Type: application/json\' -H \'x-rapidapi-proxy-secret: YOUR_SECRET\' -d \'{"url":"https://example.com/article"}\'',
+    post_html:
+      "curl -X POST 'https://web-to-markdown-api.vercel.app/' -H 'Content-Type: text/html' -H 'x-rapidapi-proxy-secret: YOUR_SECRET' --data-binary @page.html",
+  },
+};
+
+const LANDING_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Web to Markdown API</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0b1020;
+        --panel: #131a2e;
+        --border: #26314f;
+        --text: #e6ebf5;
+        --muted: #9aa7c2;
+        --accent: #60a5fa;
+        --code-bg: #080c18;
+        --badge-bg: #122b24;
+        --badge-text: #4ade80;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f6f8fc;
+          --panel: #ffffff;
+          --border: #dce3f0;
+          --text: #111827;
+          --muted: #4b5563;
+          --accent: #2563eb;
+          --code-bg: #f1f5f9;
+          --badge-bg: #dcfce7;
+          --badge-text: #166534;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+        padding: 2rem 1rem;
+      }
+      main {
+        max-width: 820px;
+        margin: 0 auto;
+        display: grid;
+        gap: 1.25rem;
+      }
+      section, header {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.25rem 1.5rem;
+      }
+      h1 { margin: 0 0 0.4rem; font-size: 1.65rem; }
+      h2 { margin: 0 0 0.75rem; font-size: 1.1rem; }
+      p { margin: 0.4rem 0; color: var(--muted); }
+      .badge {
+        display: inline-block;
+        padding: 0.2rem 0.6rem;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        background: var(--badge-bg);
+        color: var(--badge-text);
+        margin-bottom: 0.6rem;
+      }
+      ul { margin: 0.5rem 0 0; padding-left: 1.25rem; }
+      li { margin: 0.45rem 0; }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.9em;
+        background: var(--code-bg);
+        padding: 0.15rem 0.4rem;
+        border-radius: 5px;
+      }
+      pre {
+        margin: 0.5rem 0 0;
+        padding: 0.9rem 1rem;
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow-x: auto;
+        font-size: 0.85rem;
+        line-height: 1.5;
+      }
+      pre code { background: none; padding: 0; }
+      .endpoint-method {
+        font-weight: 700;
+        color: var(--accent);
+        margin-right: 0.35rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <span class="badge">HTTP 200 · Service Online</span>
+        <h1>Web to Markdown API</h1>
+        <p>Convert public web pages or raw HTML into clean, dense Markdown optimized for LLM ingestion and RAG context windows.</p>
+      </header>
+
+      <section>
+        <h2>Authentication</h2>
+        <p>All conversion requests are <strong>fail-closed</strong> and require a valid credential header:</p>
+        <ul>
+          <li><code>x-rapidapi-proxy-secret</code> — RapidAPI proxy secret</li>
+          <li><code>x-admin-key</code> — Admin API key</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Endpoints</h2>
+        <ul>
+          <li><span class="endpoint-method">GET</span><code>/</code> — Public service overview (HTML in browsers, JSON when <code>Accept: application/json</code> is requested).</li>
+          <li><span class="endpoint-method">GET</span><code>/?url=&lt;encoded_url&gt;</code> — Fetch a public HTTP/HTTPS URL and return cleaned Markdown JSON. <em>(Auth required)</em></li>
+          <li><span class="endpoint-method">POST</span><code>/</code> — Send JSON (<code>{"url": "..."}</code> or <code>{"html": "...", "base_url": "..."}</code>) or raw HTML (<code>Content-Type: text/html</code>). <em>(Auth required)</em></li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Usage Examples</h2>
+        <p>Fetch and convert a public URL:</p>
+        <pre><code>curl -G 'https://web-to-markdown-api.vercel.app/' \\
+  --data-urlencode 'url=https://example.com/article' \\
+  -H 'x-rapidapi-proxy-secret: YOUR_SECRET'</code></pre>
+        <p>Convert via JSON POST:</p>
+        <pre><code>curl -X POST 'https://web-to-markdown-api.vercel.app/' \\
+  -H 'Content-Type: application/json' \\
+  -H 'x-rapidapi-proxy-secret: YOUR_SECRET' \\
+  -d '{"url":"https://example.com/article"}'</code></pre>
+        <p>Convert raw HTML directly:</p>
+        <pre><code>curl -X POST 'https://web-to-markdown-api.vercel.app/' \\
+  -H 'Content-Type: text/html' \\
+  -H 'x-rapidapi-proxy-secret: YOUR_SECRET' \\
+  --data-binary @page.html</code></pre>
+      </section>
+    </main>
+  </body>
+</html>`;
+
 interface FetchValidationResult {
   ok: boolean;
   finalUrl?: URL;
@@ -617,6 +802,93 @@ async function validateFetchedResponse(
 }
 
 // =============================================================================
+// PUBLIC LANDING HELPERS
+// =============================================================================
+
+function getRequestPathname(req: VercelRequest): string {
+  if (!req.url) {
+    return '/';
+  }
+
+  try {
+    return new URL(req.url, 'http://localhost').pathname;
+  } catch {
+    return '';
+  }
+}
+
+function hasConversionQueryParam(req: VercelRequest): boolean {
+  const query = req.query || {};
+  for (const [key, value] of Object.entries(query)) {
+    if (CONVERSION_QUERY_PARAMS.has(key.toLowerCase()) && value !== undefined) {
+      return true;
+    }
+  }
+
+  if (req.url) {
+    try {
+      const searchParams = new URL(req.url, 'http://localhost').searchParams;
+      for (const key of searchParams.keys()) {
+        if (CONVERSION_QUERY_PARAMS.has(key.toLowerCase())) {
+          return true;
+        }
+      }
+    } catch {
+      // Malformed req.url cannot match root path anyway
+    }
+  }
+
+  return false;
+}
+
+function hasAnyAuthHeader(req: VercelRequest): boolean {
+  return (
+    req.headers['x-rapidapi-proxy-secret'] !== undefined ||
+    req.headers['x-admin-key'] !== undefined
+  );
+}
+
+/**
+ * Returns true only for unauthenticated bare GET / requests with no
+ * conversion query parameters (such as a browser visiting the root URL).
+ */
+function isBarePublicRootGet(req: VercelRequest): boolean {
+  return (
+    req.method === 'GET' &&
+    getRequestPathname(req) === '/' &&
+    !hasConversionQueryParam(req) &&
+    !hasAnyAuthHeader(req)
+  );
+}
+
+function prefersHtmlResponse(req: VercelRequest): boolean {
+  const acceptHeader = req.headers.accept;
+  const accept = (
+    Array.isArray(acceptHeader) ? acceptHeader.join(',') : acceptHeader || ''
+  ).toLowerCase();
+
+  const htmlIndex = accept.indexOf('text/html');
+  if (htmlIndex === -1) {
+    return false;
+  }
+
+  const jsonIndex = accept.indexOf('application/json');
+  return jsonIndex === -1 || htmlIndex < jsonIndex;
+}
+
+function sendLandingResponse(req: VercelRequest, res: VercelResponse): void {
+  res.setHeader('Vary', 'Accept');
+
+  if (prefersHtmlResponse(req)) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.status(200).send(LANDING_HTML);
+    return;
+  }
+
+  res.status(200).json(LANDING_INFO);
+}
+
+// =============================================================================
 // ERROR RESPONSE HELPER
 // =============================================================================
 
@@ -655,6 +927,12 @@ export default async function handler(
   // Only allow GET and POST
   if (req.method !== 'GET' && req.method !== 'POST') {
     sendError(res, 405, 'METHOD_NOT_ALLOWED', 'Only GET and POST methods are supported');
+    return;
+  }
+
+  // Serve informational landing response only for unauthenticated bare GET /
+  if (isBarePublicRootGet(req)) {
+    sendLandingResponse(req, res);
     return;
   }
 
