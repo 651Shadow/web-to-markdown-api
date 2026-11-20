@@ -32,7 +32,7 @@ async function resolveDocument(
   };
 }
 
-export default async function handler(
+export async function handleRequest(
   req: VercelRequest,
   res: VercelResponse,
   fetchOptions?: SafeFetchOptions
@@ -74,7 +74,7 @@ export default async function handler(
       );
     }
 
-    const input = parseInput(req);
+    const input = await parseInput(req);
     const document = await resolveDocument(input, fetchOptions);
     const response = convertDocument(document);
 
@@ -89,4 +89,11 @@ export default async function handler(
       new ApiError(500, 'INTERNAL_ERROR', 'An unexpected error occurred')
     );
   }
+}
+
+export default async function handler(
+  req: VercelRequest,
+  res: VercelResponse
+): Promise<void> {
+  return handleRequest(req, res);
 }

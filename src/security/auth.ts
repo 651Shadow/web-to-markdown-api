@@ -1,14 +1,11 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { VercelRequest } from '@vercel/node';
 import { ApiError } from '../errors';
 
 function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a, 'utf8');
-  const bufB = Buffer.from(b, 'utf8');
-  if (bufA.length !== bufB.length) {
-    return false;
-  }
-  return timingSafeEqual(bufA, bufB);
+  const digestA = createHash('sha256').update(a, 'utf8').digest();
+  const digestB = createHash('sha256').update(b, 'utf8').digest();
+  return timingSafeEqual(digestA, digestB);
 }
 
 function getSingleHeader(value: string | string[] | undefined): string | undefined {

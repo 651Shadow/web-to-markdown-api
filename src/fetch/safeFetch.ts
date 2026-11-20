@@ -1,7 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import type { LookupOptions } from 'node:dns';
-import type { LookupFunction } from 'node:net';
+import { isIP, type LookupFunction } from 'node:net';
 import type { Readable } from 'node:stream';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import {
@@ -45,15 +45,16 @@ function createPinnedLookup(address: string, family: 4 | 6): LookupFunction {
     options: LookupOptions | PinnedLookupCallback,
     callback?: PinnedLookupCallback
   ): void => {
+    // Defer via nextTick so ClientRequest attaches its socket 'error' listener before internalConnect runs.
     if (typeof options === 'function') {
-      options(null, address, family);
+      process.nextTick(() => options(null, address, family));
       return;
     }
     if (options && typeof options === 'object' && 'all' in options && options.all) {
-      callback?.(null, [{ address, family }]);
+      process.nextTick(() => callback?.(null, [{ address, family }]));
       return;
     }
-    callback?.(null, address, family);
+    process.nextTick(() => callback?.(null, address, family));
   };
   return lookup as LookupFunction;
 }
@@ -70,7 +71,13 @@ function isHtmlContentType(contentTypeHeader: string | string[] | undefined): bo
 }
 
 function createDecodedStream(res: http.IncomingMessage): Readable {
-  const encoding = (res.headers['content-encoding'] ?? '').toLowerCase().trim();
+  const headerVal = res.headers['content-encoding'];
+  const rawEncoding = Array.isArray(headerVal) ? headerVal.join(',') : (headerVal ?? '');
+  const encoding = rawEncoding.toLowerCase().trim();
+
+  if (!encoding || encoding === 'identity') {
+    return res;
+  }
   if (encoding === 'gzip' || encoding === 'x-gzip') {
     const gunzip = createGunzip();
     res.pipe(gunzip);
@@ -86,7 +93,12 @@ function createDecodedStream(res: http.IncomingMessage): Readable {
     res.pipe(brotli);
     return brotli;
   }
-  return res;
+
+  throw new ApiError(
+    415,
+    'UNSUPPORTED_MEDIA_TYPE',
+    'Unsupported Content-Encoding in target response'
+  );
 }
 
 type HopResult =
@@ -131,8 +143,14 @@ function executeHop(
       );
     }, Math.max(remainingTimeoutMs, 1));
 
-    const pinnedAddress = connectAddress ?? target.address;
-    const pinnedFamily: 4 | 6 = connectAddress ? 4 : target.family;
+    const rawPinned = (connectAddress ?? target.address).trim().replace(/^\[|\]$/g, '');
+    const detectedFamily = isIP(rawPinned);
+    const pinnedFamily: 4 | 6 =
+      connectAddress !== undefined
+        ? detectedFamily === 6
+          ? 6
+          : 4
+        : target.family;
 
     const client = target.url.protocol === 'https:' ? https : http;
     const req = client.request(
@@ -140,7 +158,7 @@ function executeHop(
       {
         method: 'GET',
         agent: false,
-        lookup: createPinnedLookup(pinnedAddress, pinnedFamily),
+        lookup: createPinnedLookup(rawPinned, pinnedFamily),
         headers: {
           'User-Agent': USER_AGENT,
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -152,11 +170,16 @@ function executeHop(
       },
       (res) => {
         currentRes = res;
+        res.on('error', () => {
+          finishReject(
+            new ApiError(502, 'FETCH_ERROR', 'Failed to read response from target page')
+          );
+        });
+
         const statusCode = res.statusCode ?? 0;
 
         if (REDIRECT_STATUS_CODES.has(statusCode)) {
           const locationHeader = res.headers.location;
-          res.resume();
           if (typeof locationHeader !== 'string' || !locationHeader.trim()) {
             finishReject(
               new ApiError(
@@ -194,11 +217,12 @@ function executeHop(
           }
 
           finishResolve({ kind: 'redirect', nextUrl });
+          res.destroy();
+          req.destroy();
           return;
         }
 
         if (statusCode === 404) {
-          res.resume();
           finishReject(
             new ApiError(404, 'PAGE_NOT_FOUND', 'The requested page was not found')
           );
@@ -206,7 +230,6 @@ function executeHop(
         }
 
         if (statusCode < 200 || statusCode >= 300) {
-          res.resume();
           finishReject(
             new ApiError(502, 'FETCH_ERROR', 'Failed to fetch the requested page')
           );
@@ -239,15 +262,37 @@ function executeHop(
           }
         }
 
-        decodedStream = createDecodedStream(res);
+        try {
+          decodedStream = createDecodedStream(res);
+        } catch (err) {
+          finishReject(
+            err instanceof ApiError
+              ? err
+              : new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Unsupported Content-Encoding in target response')
+          );
+          return;
+        }
+
+        let rawBytes = 0;
+        if (decodedStream !== res) {
+          res.on('data', (rawChunk: Buffer | string) => {
+            rawBytes += Buffer.isBuffer(rawChunk)
+              ? rawChunk.length
+              : Buffer.byteLength(rawChunk, 'utf8');
+            if (rawBytes > maxBytes) {
+              finishReject(
+                new ApiError(
+                  413,
+                  'PAGE_TOO_LARGE',
+                  'Page exceeds the 2MB size limit for free tier'
+                )
+              );
+            }
+          });
+        }
+
         const chunks: Buffer[] = [];
         let totalBytes = 0;
-
-        res.on('error', () => {
-          finishReject(
-            new ApiError(502, 'FETCH_ERROR', 'Failed to read response from target page')
-          );
-        });
 
         decodedStream.on('data', (chunk: Buffer | string) => {
           const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8');
@@ -298,7 +343,7 @@ function executeHop(
 
 /**
  * Fetches an HTML document over HTTP/HTTPS with hop-by-hop SSRF validation,
- * per-hop DNS pinning, early Content-Type verification, and streaming decompressed
+ * per-hop DNS pinning, early Content-Type verification, and streaming wire + decompressed
  * byte-limit enforcement.
  */
 export async function safeFetchHtml(
@@ -313,7 +358,34 @@ export async function safeFetchHtml(
   let currentUrl = initialUrl;
 
   for (let hop = 0; hop <= maxRedirects; hop += 1) {
-    const target = await resolveSafeTarget(currentUrl, options.lookupFn);
+    const remainingBeforeDns = deadline - Date.now();
+    if (remainingBeforeDns <= 0) {
+      throw new ApiError(
+        504,
+        'TIMEOUT',
+        'The request timed out while fetching the page'
+      );
+    }
+
+    let dnsTimer: ReturnType<typeof setTimeout> | undefined;
+    const target = await Promise.race([
+      resolveSafeTarget(currentUrl, options.lookupFn),
+      new Promise<never>((_, reject) => {
+        dnsTimer = setTimeout(() => {
+          reject(
+            new ApiError(
+              504,
+              'TIMEOUT',
+              'The request timed out while fetching the page'
+            )
+          );
+        }, remainingBeforeDns);
+      }),
+    ]).finally(() => {
+      if (dnsTimer) {
+        clearTimeout(dnsTimer);
+      }
+    });
 
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {

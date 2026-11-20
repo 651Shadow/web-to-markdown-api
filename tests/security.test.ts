@@ -52,6 +52,8 @@ describe('web-to-markdown security & pipeline unit tests', () => {
     expect(isPrivateIP('2001:db8::1')).toBe(true);
     expect(isPrivateIP('fe80::1')).toBe(true);
     expect(isPrivateIP('febf::1')).toBe(true);
+    expect(isPrivateIP('fec0::1')).toBe(true);
+    expect(isPrivateIP('::ffff:0:127.0.0.1')).toBe(true);
     expect(isPrivateIP('fc00::1')).toBe(true);
     expect(isPrivateIP('fd12:3456:789a::1')).toBe(true);
     expect(isPrivateIP('::ffff:127.0.0.1')).toBe(true);

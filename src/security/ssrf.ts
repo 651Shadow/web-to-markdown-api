@@ -45,6 +45,7 @@ const PRIVATE_BLOCK_LIST = (() => {
   // documentation, 6to4, unique-local, link-local, and multicast ranges.
   // Note: Node's BlockList also maps IPv4 subnets across ::ffff:0:0/96 (both dotted and hex forms).
   blockList.addSubnet('::', 96, 'ipv6');
+  blockList.addSubnet('::ffff:0:0:0', 96, 'ipv6');
   blockList.addSubnet('64:ff9b::', 96, 'ipv6');
   blockList.addSubnet('64:ff9b:1::', 48, 'ipv6');
   blockList.addSubnet('100::', 64, 'ipv6');
@@ -53,6 +54,7 @@ const PRIVATE_BLOCK_LIST = (() => {
   blockList.addSubnet('2002::', 16, 'ipv6');
   blockList.addSubnet('fc00::', 7, 'ipv6');
   blockList.addSubnet('fe80::', 10, 'ipv6');
+  blockList.addSubnet('fec0::', 10, 'ipv6');
   blockList.addSubnet('ff00::', 8, 'ipv6');
 
   return blockList;

@@ -1,8 +1,9 @@
 import http from 'node:http';
+import { Readable } from 'node:stream';
 import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import handler from '../api/index';
+import handler, { handleRequest } from '../api/index';
 import type { SafeFetchOptions } from '../src/fetch/safeFetch';
 import {
   checkRateLimit,
@@ -341,7 +342,7 @@ describe('web-to-markdown handler hardening & regression suite', () => {
       });
       const res = createMockResponse();
 
-      await handler(req, res, fetchOptions);
+      await handleRequest(req, res, fetchOptions);
 
       expect(res._status).toBe(200);
       const body = res._json as {
@@ -366,7 +367,7 @@ describe('web-to-markdown handler hardening & regression suite', () => {
       });
       const res = createMockResponse();
 
-      await handler(req, res, fetchOptions);
+      await handleRequest(req, res, fetchOptions);
 
       expect(res._status).toBe(403);
       expect((res._json as { error: string }).error).toBe('SSRF_BLOCKED');
@@ -380,7 +381,7 @@ describe('web-to-markdown handler hardening & regression suite', () => {
       });
       const res = createMockResponse();
 
-      await handler(req, res, fetchOptions);
+      await handleRequest(req, res, fetchOptions);
 
       expect(res._status).toBe(415);
       expect((res._json as { error: string }).error).toBe('UNSUPPORTED_MEDIA_TYPE');
@@ -393,10 +394,170 @@ describe('web-to-markdown handler hardening & regression suite', () => {
       });
       const res = createMockResponse();
 
-      await handler(req, res, fetchOptions);
+      await handleRequest(req, res, fetchOptions);
 
       expect(res._status).toBe(413);
       expect((res._json as { error: string }).error).toBe('PAGE_TOO_LARGE');
+    });
+
+    it('reads raw stream fallback when Content-Type: text/html leaves req.body undefined (Vercel parity)', async () => {
+      const streamReq = Readable.from([
+        Buffer.from('<html><body><h1>Streamed HTML</h1><p>Works without req.body</p></body></html>'),
+      ]) as unknown as VercelRequest & { method: string; query: Record<string, unknown>; headers: Record<string, string>; body?: unknown };
+      streamReq.method = 'POST';
+      streamReq.query = {};
+      streamReq.headers = { 'content-type': 'text/html; charset=utf-8' };
+      streamReq.body = undefined;
+
+      const res = createMockResponse();
+      await handler(streamReq, res);
+
+      expect(res._status).toBe(200);
+      expect((res._json as { markdown: string }).markdown).toContain('# Streamed HTML');
+    });
+
+    it('returns 400 INVALID_INPUT when Vercel lazy req.body getter throws on malformed JSON', async () => {
+      const lazyErrorReq = {
+        method: 'POST',
+        query: {},
+        headers: { 'content-type': 'application/json' },
+        get body() {
+          throw new Error('Invalid JSON');
+        },
+      } as unknown as VercelRequest;
+
+      const res = createMockResponse();
+      await handler(lazyErrorReq, res);
+
+      expect(res._status).toBe(400);
+      expect((res._json as { error: string }).error).toBe('INVALID_INPUT');
+    });
+
+    it('handles synchronous socket connect failures without crashing the process', async () => {
+      let uncaught: unknown = null;
+      const listener = (err: unknown) => {
+        uncaught = err;
+      };
+      process.once('uncaughtException', listener);
+
+      try {
+        const res = createMockResponse();
+        await handleRequest(
+          createMockRequest({
+            method: 'GET',
+            query: { url: `http://public.example.test:${port}/docs/v2/guide.html` },
+          }),
+          res,
+          {
+            ...fetchOptions,
+            // Force a family/connect error cleanly
+            connectAddress: '::1',
+          }
+        );
+
+        await new Promise((r) => setTimeout(r, 30));
+        expect(uncaught).toBeNull();
+        expect([502, 504].includes(res._status)).toBe(true);
+      } finally {
+        process.removeListener('uncaughtException', listener);
+      }
+    });
+
+    it('rejects chunked gzip payloads whose compressed wire bytes exceed maxBytes (413)', async () => {
+      // Build a gzip buffer > 4096 bytes of comment/zero padding decompressing to tiny HTML
+      const largeCompressed = gzipSync(Buffer.from('<html><body><p>' + ' '.repeat(128 * 1024) + '</p></body></html>'));
+      const wireCheckServer = http.createServer((_req, serverRes) => {
+        serverRes.writeHead(200, {
+          'Content-Type': 'text/html',
+          'Content-Encoding': 'gzip',
+          'Transfer-Encoding': 'chunked',
+        });
+        serverRes.end(largeCompressed);
+      });
+      await new Promise<void>((resolve) => wireCheckServer.listen(0, '127.0.0.1', resolve));
+      const addr = wireCheckServer.address();
+      const wirePort = typeof addr === 'object' && addr ? addr.port : 0;
+
+      try {
+        const res = createMockResponse();
+        await handleRequest(
+          createMockRequest({
+            method: 'GET',
+            query: { url: `http://public.example.test:${wirePort}/wire` },
+          }),
+          res,
+          { ...fetchOptions, maxBytes: 200 }
+        );
+        expect(res._status).toBe(413);
+        expect((res._json as { error: string }).error).toBe('PAGE_TOO_LARGE');
+      } finally {
+        await new Promise<void>((resolve) => wireCheckServer.close(() => resolve()));
+      }
+    });
+
+    it('rejects unsupported or stacked Content-Encoding with 415 UNSUPPORTED_MEDIA_TYPE', async () => {
+      const encServer = http.createServer((_req, serverRes) => {
+        serverRes.writeHead(200, {
+          'Content-Type': 'text/html',
+          'Content-Encoding': 'gzip, gzip',
+        });
+        serverRes.end('raw');
+      });
+      await new Promise<void>((resolve) => encServer.listen(0, '127.0.0.1', resolve));
+      const addr = encServer.address();
+      const encPort = typeof addr === 'object' && addr ? addr.port : 0;
+
+      try {
+        const res = createMockResponse();
+        await handleRequest(
+          createMockRequest({
+            method: 'GET',
+            query: { url: `http://public.example.test:${encPort}/stacked` },
+          }),
+          res,
+          fetchOptions
+        );
+        expect(res._status).toBe(415);
+        expect((res._json as { error: string }).error).toBe('UNSUPPORTED_MEDIA_TYPE');
+      } finally {
+        await new Promise<void>((resolve) => encServer.close(() => resolve()));
+      }
+    });
+
+    it('destroys slow redirect sockets promptly after following 3xx redirects', async () => {
+      let slowClosedEarly = false;
+      const redirectServer = http.createServer((req, serverRes) => {
+        if (req.url === '/slow-302') {
+          serverRes.writeHead(302, { Location: `http://public.example.test:${port}/docs/v2/guide.html` });
+          serverRes.write('slow redirect body');
+          serverRes.on('close', () => {
+            slowClosedEarly = true;
+          });
+          return;
+        }
+        serverRes.writeHead(404);
+        serverRes.end();
+      });
+      await new Promise<void>((resolve) => redirectServer.listen(0, '127.0.0.1', resolve));
+      const addr = redirectServer.address();
+      const redirPort = typeof addr === 'object' && addr ? addr.port : 0;
+
+      try {
+        const res = createMockResponse();
+        await handleRequest(
+          createMockRequest({
+            method: 'GET',
+            query: { url: `http://public.example.test:${redirPort}/slow-302` },
+          }),
+          res,
+          fetchOptions
+        );
+        await new Promise((r) => setTimeout(r, 30));
+        expect(res._status).toBe(200);
+        expect(slowClosedEarly).toBe(true);
+      } finally {
+        await new Promise<void>((resolve) => redirectServer.close(() => resolve()));
+      }
     });
   });
 });
