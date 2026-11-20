@@ -60,7 +60,8 @@ When feeding web content to LLMs, you're paying for every token—including usel
 
 ```json
 {
-  "url": "https://example.com",
+  "url": "https://example.com/",
+  "source": "url",
   "markdown": "# Example Domain\n\nThis domain is for use in illustrative examples...",
   "meta": {
     "title": "Example Domain",
@@ -87,11 +88,11 @@ https://web-to-markdown-api.vercel.app
 
 ---
 
-## Step 4: Add the Endpoint
+## Step 4: Add the Endpoints
 
 Go to **"Endpoints"** and click **"Create Endpoint"**
 
-### Endpoint Configuration
+### Endpoint 1: Convert URL to Markdown (`GET /`)
 
 | Field | Value |
 |-------|-------|
@@ -100,19 +101,20 @@ Go to **"Endpoints"** and click **"Create Endpoint"**
 | **Method** | `GET` |
 | **Endpoint Path** | `/` |
 
-### Parameters
-
-Click **"Add Parameter"** and configure:
+#### Query Parameters
 
 | Parameter Name | Type | Required | Description |
 |----------------|------|----------|-------------|
-| `url` | `string` | Yes | The URL of the web page to convert |
+| `url` | `string` | Yes | The full HTTP/HTTPS URL of the web page to convert |
 
-#### Parameter Details for `url`:
+### Endpoint 2: Convert URL or Raw HTML (`POST /`)
 
-- **Parameter Type:** Query
-- **Example Value:** `https://example.com`
-- **Description:** `The full URL of the web page to convert to Markdown. Must be a valid HTTP or HTTPS URL.`
+| Field | Value |
+|-------|-------|
+| **Name** | `Convert URL or Raw HTML to Markdown` |
+| **Description** | `Converts either a JSON payload ({ "url" } or { "html", "base_url" }) or a raw Content-Type: text/html body into Markdown` |
+| **Method** | `POST` |
+| **Endpoint Path** | `/` |
 
 ---
 
@@ -160,6 +162,7 @@ This is the most important step for security.
 ```json
 {
   "url": "https://example.com/",
+  "source": "url",
   "markdown": "# Example Domain\n\nThis domain is for use in illustrative examples in documents...",
   "meta": {
     "title": "Example Domain",
@@ -219,13 +222,21 @@ Go to **"Documentation"** and add error responses:
 
 | Status Code | Error Code | Description |
 |-------------|------------|-------------|
-| `400` | `MISSING_URL` | The `url` parameter is required |
-| `400` | `INVALID_URL` | The provided URL is not valid |
-| `403` | `FORBIDDEN` | Invalid or missing authentication |
-| `403` | `SSRF_BLOCKED` | URL points to a blocked address |
+| `400` | `MISSING_INPUT` | Neither `url` nor `html` input was provided |
+| `400` | `INVALID_INPUT` | Non-string input type, malformed JSON, or ambiguous dual `url` + `html` input |
+| `400` | `EMPTY_HTML` | The provided HTML content is empty |
+| `400` | `INVALID_URL` | The provided `url` is not a valid HTTP or HTTPS URL |
+| `400` | `INVALID_BASE_URL` | The provided `base_url` is not a valid HTTP or HTTPS URL |
+| `403` | `FORBIDDEN` | Invalid or missing authentication credentials |
+| `403` | `SSRF_BLOCKED` | Target or redirect URL points to a blocked or private address |
 | `404` | `PAGE_NOT_FOUND` | The target page was not found |
-| `413` | `PAGE_TOO_LARGE` | Page exceeds 2MB size limit |
-| `502` | `FETCH_ERROR` | Failed to fetch the target page |
+| `405` | `METHOD_NOT_ALLOWED` | Only `GET`, `POST`, and `OPTIONS` methods are supported |
+| `413` | `PAGE_TOO_LARGE` | Page or HTML payload exceeds the 2MB size limit |
+| `415` | `UNSUPPORTED_MEDIA_TYPE` | Fetched URL returned a non-HTML content type |
+| `429` | `RATE_LIMITED` | Too many requests from the same client IP (`Retry-After` header included) |
+| `500` | `PROCESSING_ERROR` | Failed to clean or convert the HTML document |
+| `502` | `FETCH_ERROR` | Failed to fetch the target page or invalid upstream redirect |
+| `503` | `AUTH_NOT_CONFIGURED` | Server auth secrets are not configured and `ALLOW_UNAUTHENTICATED_DEV` is not enabled |
 | `504` | `TIMEOUT` | Request timed out (>8 seconds) |
 
 ### Response Schema
@@ -233,8 +244,13 @@ Go to **"Documentation"** and add error responses:
 ```json
 {
   "url": {
+    "type": ["string", "null"],
+    "description": "The final resolved URL (after any redirects) or base_url, or null for raw HTML without base_url"
+  },
+  "source": {
     "type": "string",
-    "description": "The normalized source URL"
+    "enum": ["url", "html"],
+    "description": "Indicates whether the Markdown was produced from a fetched URL or direct HTML ingestion"
   },
   "markdown": {
     "type": "string", 
@@ -244,7 +260,7 @@ Go to **"Documentation"** and add error responses:
     "type": "object",
     "properties": {
       "title": {
-        "type": "string",
+        "type": ["string", "null"],
         "description": "Page title (if available)"
       },
       "original_length": {
@@ -302,6 +318,9 @@ After your API is approved:
 |----------|--------------|---------|
 | `RAPIDAPI_SECRET` | Vercel | Validates requests from RapidAPI |
 | `ADMIN_SECRET` | Vercel | Your personal testing key |
+| `ALLOW_UNAUTHENTICATED_DEV` | Local `.env` only | Set to `true` only for local development without secrets |
+| `RATE_LIMIT_MAX` | Vercel / `.env` | Max requests per window per IP (default `30`) |
+| `RATE_LIMIT_WINDOW_MS` | Vercel / `.env` | Rate limit window in milliseconds (default `60000`) |
 
 ---
 
