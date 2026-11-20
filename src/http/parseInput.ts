@@ -131,10 +131,35 @@ async function readRawRequestStream(
 ): Promise<string | undefined> {
   const stream = req as unknown as {
     on?: (event: string, listener: (...args: unknown[]) => void) => unknown;
+    read?: () => unknown;
     destroy?: () => void;
     readableEnded?: boolean;
   };
-  if (typeof stream.on !== 'function' || stream.readableEnded) {
+
+  if (stream.readableEnded) {
+    if (typeof stream.read !== 'function') {
+      return undefined;
+    }
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let nextChunk: unknown;
+    while ((nextChunk = stream.read()) !== null && nextChunk !== undefined) {
+      const buf = Buffer.isBuffer(nextChunk) ? nextChunk : Buffer.from(String(nextChunk), 'utf8');
+      totalBytes += buf.length;
+      if (totalBytes > maxBytes) {
+        stream.destroy?.();
+        throw new ApiError(
+          413,
+          'PAGE_TOO_LARGE',
+          'HTML exceeds the 2MB size limit for free tier'
+        );
+      }
+      chunks.push(buf);
+    }
+    return chunks.length === 0 ? undefined : Buffer.concat(chunks, totalBytes).toString('utf8');
+  }
+
+  if (typeof stream.on !== 'function') {
     return undefined;
   }
 

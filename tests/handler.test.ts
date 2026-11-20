@@ -416,6 +416,61 @@ describe('web-to-markdown handler hardening & regression suite', () => {
       expect((res._json as { markdown: string }).markdown).toContain('# Streamed HTML');
     });
 
+    it('reads buffered PassThrough body when Vercel restoreBody leaves req.readableEnded true', async () => {
+      const { PassThrough } = await import('node:stream');
+      const restored = new PassThrough();
+      restored.end(Buffer.from('<h1>Restored Vercel HTML</h1><p>Works with readableEnded</p>'));
+
+      const vercelReq = {
+        method: 'POST',
+        query: {},
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+        body: undefined,
+        readableEnded: true,
+        read: (...args: Parameters<typeof restored.read>) => restored.read(...args),
+        on: (ev: string, fn: (...args: unknown[]) => void) => restored.on(ev, fn),
+      } as unknown as VercelRequest;
+
+      const res = createMockResponse();
+      await handler(vercelReq, res);
+
+      expect(res._status).toBe(200);
+      expect((res._json as { markdown: string }).markdown).toContain('# Restored Vercel HTML');
+
+      // Oversized restored PassThrough rejects with 413
+      const big = new PassThrough();
+      big.end(Buffer.alloc(2 * 1024 * 1024 + 10, 'a'));
+      const bigReq = {
+        method: 'POST',
+        query: {},
+        headers: { 'content-type': 'text/html' },
+        body: undefined,
+        readableEnded: true,
+        read: (...args: Parameters<typeof big.read>) => big.read(...args),
+        destroy: () => big.destroy(),
+      } as unknown as VercelRequest;
+      const bigRes = createMockResponse();
+      await handler(bigReq, bigRes);
+      expect(bigRes._status).toBe(413);
+      expect((bigRes._json as { error: string }).error).toBe('PAGE_TOO_LARGE');
+
+      // Already-ended empty stream fails immediately with 400 MISSING_INPUT
+      const empty = new PassThrough();
+      empty.end();
+      const emptyReq = {
+        method: 'POST',
+        query: {},
+        headers: { 'content-type': 'text/html' },
+        body: undefined,
+        readableEnded: true,
+        read: () => empty.read(),
+      } as unknown as VercelRequest;
+      const emptyRes = createMockResponse();
+      await handler(emptyReq, emptyRes);
+      expect(emptyRes._status).toBe(400);
+      expect((emptyRes._json as { error: string }).error).toBe('MISSING_INPUT');
+    });
+
     it('returns 400 INVALID_INPUT when Vercel lazy req.body getter throws on malformed JSON', async () => {
       const lazyErrorReq = {
         method: 'POST',

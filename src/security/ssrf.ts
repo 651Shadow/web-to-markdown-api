@@ -36,8 +36,11 @@ const PRIVATE_BLOCK_LIST = (() => {
   blockList.addSubnet('169.254.0.0', 16, 'ipv4');
   blockList.addSubnet('172.16.0.0', 12, 'ipv4');
   blockList.addSubnet('192.0.0.0', 24, 'ipv4');
+  blockList.addSubnet('192.0.2.0', 24, 'ipv4');
   blockList.addSubnet('192.168.0.0', 16, 'ipv4');
   blockList.addSubnet('198.18.0.0', 15, 'ipv4');
+  blockList.addSubnet('198.51.100.0', 24, 'ipv4');
+  blockList.addSubnet('203.0.113.0', 24, 'ipv4');
   blockList.addSubnet('224.0.0.0', 4, 'ipv4');
   blockList.addSubnet('240.0.0.0', 4, 'ipv4');
 

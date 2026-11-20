@@ -61,13 +61,10 @@ function createPinnedLookup(address: string, family: 4 | 6): LookupFunction {
 
 function isHtmlContentType(contentTypeHeader: string | string[] | undefined): boolean {
   const raw = Array.isArray(contentTypeHeader)
-    ? contentTypeHeader.join('; ')
+    ? contentTypeHeader[0] ?? ''
     : contentTypeHeader ?? '';
-  const normalized = raw.toLowerCase();
-  return (
-    normalized.includes('text/html') ||
-    normalized.includes('application/xhtml+xml')
-  );
+  const mediaType = raw.split(';')[0].trim().toLowerCase();
+  return mediaType === 'text/html' || mediaType === 'application/xhtml+xml';
 }
 
 function createDecodedStream(res: http.IncomingMessage): Readable {
